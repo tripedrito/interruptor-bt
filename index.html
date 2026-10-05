@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Interruptor planta</title>
+<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<style>
+  :root { --bg:#f4f5f7; --fg:#1b1f24; --card:#fff; --acc:#3949ab; --ok:#2e7d32; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#14161a; --fg:#eceff3; --card:#1f2329; --acc:#8c9eff; --ok:#66bb6a; } }
+  body { margin:0; font-family:system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width:420px; margin:0 auto; padding:24px 16px; text-align:center; }
+  h1 { font-size:20px; margin:0 0 8px; }
+  .icon { font-size:96px; line-height:1.2; color:gray; }
+  .icon.on { color:var(--ok); }
+  #msg { min-height:48px; font-size:18px; margin:8px 0 24px; }
+  button { width:100%; padding:18px; margin:8px 0; font-size:22px; border-radius:14px; border:2px solid var(--acc); }
+  #on { background:var(--acc); color:#fff; }
+  #off { background:transparent; color:var(--acc); }
+  #st { font-size:16px; padding:10px; border:0; background:none; color:var(--acc); }
+  button:disabled { opacity:.5; }
+  .modes { display:flex; gap:8px; justify-content:center; margin-bottom:8px; }
+  .modes label { padding:6px 12px; border:1px solid var(--acc); border-radius:20px; }
+  details { margin-top:24px; background:var(--card); border-radius:12px; padding:12px; text-align:left; }
+  label.f { display:block; margin:8px 0 4px; }
+  input, select, textarea { width:100%; box-sizing:border-box; font-size:16px; padding:8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Interruptor planta</h1>
+  <div class="modes">
+    <label><input type="radio" name="mode" value="net" checked> Internet</label>
+    <label><input type="radio" name="mode" value="ble"> Bluetooth</label>
+  </div>
+  <div id="icon" class="icon">&#9211;</div>
+  <div id="msg">Toque ESTADO para consultar.</div>
+  <button id="on">ACTIVAR (2 min)</button>
+  <button id="off">DESACTIVAR</button>
+  <button id="st">ESTADO</button>
+  <details id="cfg">
+    <summary>Configuracion</summary>
+    <label class="f" for="uid">Usuario</label>
+    <select id="uid"><option>1</option><option>2</option><option>3</option></select>
+    <label class="f" for="pin">PIN (8 caracteres)</label>
+    <input id="pin" maxlength="8" autocomplete="off" autocapitalize="off" autocorrect="off">
+    <label class="f" for="net">Codigo de Internet (url|usuario|clave|tema)</label>
+    <textarea id="net" rows="3" autocomplete="off" autocapitalize="off" autocorrect="off"></textarea>
+    <button id="save" style="font-size:18px;padding:10px">Guardar</button>
+  </details>
+</main>
+<script>
+const SVC   = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const NONCE = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+const CMD   = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+const STAT  = '6e400004-b5a3-f393-e0a9-e50e24dcca9e';
+const ON = 1, OFF = 2, STATUS = 3;
+
+const $ = id => document.getElementById(id);
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+};
+let device = null, busy = false, countdown = null;
+
+function load() {
+  if (store.get('uid')) $('uid').value = store.get('uid');
+  if (store.get('pin')) $('pin').value = store.get('pin');
+  if (store.get('net')) $('net').value = store.get('net');
+  const m = store.get('mode') || 'net';
+  document.querySelector(`input[name=mode][value=${m}]`).checked = true;
+  if (!store.get('pin')) $('cfg').open = true;
+}
+function mode() { return document.querySelector('input[name=mode]:checked').value; }
+document.querySelectorAll('input[name=mode]').forEach(r => r.onchange = () => store.set('mode', mode()));
+$('save').onclick = () => {
+  if ($('pin').value.length !== 8) { setMsg('El PIN debe tener 8 caracteres.'); return; }
+  store.set('uid', $('uid').value); store.set('pin', $('pin').value); store.set('net', $('net').value.trim());
+  $('cfg').open = false; setMsg('Guardado.');
+};
+
+function setMsg(t) { $('msg').textContent = t; }
+function setBusy(b) { busy = b; ['on','off','st'].forEach(i => $(i).disabled = b); }
+
+const toHex = u8 => [...u8].map(b => b.toString(16).padStart(2, '0')).join('');
+const fromHex = h => Uint8Array.from(h.match(/../g).map(x => parseInt(x, 16)));
+
+async function hmac8(pin, nonce, cmd) {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin),
+    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const msg = new Uint8Array(nonce.length + 1);
+  msg.set(nonce); msg[nonce.length] = cmd;
+  return new Uint8Array(await crypto.subtle.sign('HMAC', key, msg)).slice(0, 8);
+}
+
+// Muestra el resultado y la cuenta regresiva de los 2 minutos.
+function show(on, left, ok, cmd) {
+  clearInterval(countdown);
+  $('icon').className = 'icon' + (on ? ' on' : '');
+  const expected = cmd === ON ? true : cmd === OFF ? false : on;
+  if (!ok || on !== expected) { setMsg('PIN o usuario incorrectos (o bloqueado 60 s).'); return; }
+  if (!on) { setMsg('DESACTIVADO.'); return; }
+  let t = left;
+  const draw = () => setMsg(`ACTIVADO: se desactiva solo en ${Math.floor(t/60)}:${String(t%60).padStart(2,'0')}`);
+  draw();
+  countdown = setInterval(() => { t--; if (t <= 0) { clearInterval(countdown); setMsg('Tiempo cumplido: DESACTIVADO.'); $('icon').className = 'icon'; } else draw(); }, 1000);
+}
+
+// ---------- Internet (MQTT por WebSocket) ----------
+function sendNet(cmd, uid, pin) {
+  const parts = ($('net').value || store.get('net') || '').split('|');
+  if (parts.length !== 4) throw new Error('Falta el codigo de Internet en Configuracion.');
+  const [url, user, pass, base] = parts.map(s => s.trim());
+  return new Promise((resolve, reject) => {
+    const c = mqtt.connect(url, { username: user, password: pass, reconnectPeriod: 0, connectTimeout: 8000 });
+    let sent = false;
+    const fin = (fn, v) => { clearTimeout(timer); c.end(true); fn(v); };
+    const timer = setTimeout(() => fin(reject, new Error('El dispositivo no responde (sin internet o apagado).')), 15000);
+    c.on('connect', () => c.subscribe([`${base}/nonce`, `${base}/status`]));
+    c.on('error', e => fin(reject, e));
+    c.on('message', async (topic, payload) => {
+      const s = payload.toString();
+      if (topic === `${base}/nonce` && !sent) {
+        sent = true;
+        const mac = await hmac8(pin, fromHex(s), cmd);
+        c.publish(`${base}/cmd`, `${uid}:${cmd}:${toHex(mac)}`);
+      } else if (topic === `${base}/status` && sent) {
+        fin(resolve, JSON.parse(s));
+      }
+    });
+  });
+}
+
+// ---------- Bluetooth ----------
+async function sendBle(cmd, uid, pin) {
+  if (!navigator.bluetooth) throw new Error('Este navegador no soporta Bluetooth web. En iPhone use Bluefy.');
+  if (!device) {
+    setMsg('Elija el dispositivo "Interruptor"...');
+    device = await navigator.bluetooth.requestDevice({ filters: [{ services: [SVC] }] });
+  }
+  try {
+    setMsg('Conectando...');
+    const server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(SVC);
+    const nv = await (await svc.getCharacteristic(NONCE)).readValue();
+    const nonce = new Uint8Array(nv.buffer, nv.byteOffset, nv.byteLength);
+    const mac = await hmac8(pin, nonce, cmd);
+    const payload = new Uint8Array(10);
+    payload[0] = uid; payload[1] = cmd; payload.set(mac, 2);
+    await (await svc.getCharacteristic(CMD)).writeValue(payload);
+    const st = await (await svc.getCharacteristic(STAT)).readValue();
+    return { on: st.getUint8(0), left: st.byteLength > 1 ? st.getUint8(1) : 0, ok: 1 };
+  } finally {
+    try { if (device.gatt.connected) device.gatt.disconnect(); } catch (e) {}
+  }
+}
+
+async function send(cmd) {
+  if (busy) return;
+  const pin = $('pin').value, uid = parseInt($('uid').value, 10);
+  if (pin.length !== 8) { $('cfg').open = true; setMsg('Configure su usuario y PIN.'); return; }
+  setBusy(true);
+  try {
+    setMsg(mode() === 'net' ? 'Conectando por Internet...' : 'Buscando por Bluetooth...');
+    const r = mode() === 'net' ? await sendNet(cmd, uid, pin) : await sendBle(cmd, uid, pin);
+    show(!!r.on, r.left, !!r.ok, cmd);
+  } catch (e) {
+    if (e.name === 'NotFoundError') device = null;
+    setMsg(e.name === 'NotFoundError' ? 'Cancelado o no encontrado. Acerquese.' : 'Error: ' + (e.message || e));
+  } finally { setBusy(false); }
+}
+$('on').onclick  = () => send(ON);
+$('off').onclick = () => send(OFF);
+$('st').onclick  = () => send(STATUS);
+load();
+</script>
+</body>
+</html>
