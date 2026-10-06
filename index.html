@@ -4,7 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Interruptor planta</title>
-<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="theme-color" content="#3949ab">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Interruptor">
+<script src="mqtt.min.js"></script>
 <style>
   :root { --bg:#f4f5f7; --fg:#1b1f24; --card:#fff; --acc:#3949ab; --ok:#2e7d32; }
   @media (prefers-color-scheme: dark) { :root { --bg:#14161a; --fg:#eceff3; --card:#1f2329; --acc:#8c9eff; --ok:#66bb6a; } }
@@ -49,6 +55,9 @@
     <textarea id="devs" rows="5" autocomplete="off" autocapitalize="off" autocorrect="off"></textarea>
     <div class="hint">Cada linea: Nombre|tema|usuario(1-3)|PIN de 8 caracteres.<br>Solo ponga los lugares a los que tiene acceso.</div>
     <button id="save" style="font-size:18px;padding:10px">Guardar</button>
+    <label class="f" for="code">O pegue aqui el codigo de configuracion que le enviaron</label>
+    <textarea id="code" rows="2" autocomplete="off" autocapitalize="off" autocorrect="off"></textarea>
+    <button id="importar" style="font-size:18px;padding:10px">Importar codigo</button>
   </details>
   <details id="adm">
     <summary>Administrar usuarios (solo administrador)</summary>
@@ -106,6 +115,31 @@ $('save').onclick = () => {
   if (!parseDevs().length) { setMsg('Ninguna linea valida (revise el formato y el PIN de 8 caracteres).'); return; }
   $('cfg').open = false; setMsg('Guardado.');
 };
+
+// Codigo de configuracion: base64url de {"b":"url|usuario|clave","d":["Nombre|tema|uid|PIN", ...]}
+function importCode(raw) {
+  try {
+    let c = (raw || '').trim();
+    const i = c.indexOf('#cfg=');
+    if (i >= 0) c = c.slice(i + 5);
+    c = c.replace(/-/g, '+').replace(/_/g, '/').replace(/\s+/g, '');
+    while (c.length % 4) c += '=';
+    const j = JSON.parse(atob(c));
+    if (!j.b || !Array.isArray(j.d) || !j.d.length) return false;
+    store.set('broker', j.b); store.set('devs', j.d.join('\n'));
+    return true;
+  } catch (e) { return false; }
+}
+$('importar').onclick = () => {
+  if (importCode($('code').value)) { $('code').value = ''; load(); $('cfg').open = false; setMsg('Configuracion importada. Ya puede usar la app.'); }
+  else setMsg('Codigo no valido. Pegue el codigo completo que le enviaron.');
+};
+let importedNow = false;
+if (location.hash.startsWith('#cfg=')) {
+  importedNow = importCode(location.hash);
+  history.replaceState(null, '', location.pathname + location.search);
+}
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 
 function setMsg(t) { $('msg').textContent = t; }
 function setBusy(b) { busy = b; ['on','off','st'].forEach(i => $(i).disabled = b); }
@@ -175,7 +209,11 @@ async function sendBle(d, cmd, arg, newPin) {
   if (!navigator.bluetooth) throw new Error('Este navegador no soporta Bluetooth web. En iPhone use Bluefy.');
   if (!bleDevice) {
     setMsg(`Elija "Int-${d.name}"...`);
-    bleDevice = await navigator.bluetooth.requestDevice({ filters: [{ services: [SVC], name: 'Int-' + d.name }] });
+    bleDevice = await navigator.bluetooth.requestDevice({ filters: [{ services: [SVC] }] });
+    if (bleDevice.name && bleDevice.name !== 'Int-' + d.name) {
+      const otro = bleDevice.name; bleDevice = null;
+      throw new Error('Eligio "' + otro + '", pero esta linea es de "Int-' + d.name + '".');
+    }
   }
   try {
     setMsg('Conectando...');
@@ -232,6 +270,7 @@ $('deluser').onclick = () => {
   if (confirm('Eliminar el usuario ' + n + ' de ' + currentDev().name + '?')) send(DELUSER, n);
 };
 load();
+if (importedNow) setMsg('Configuracion importada. Ya puede usar la app.');
 </script>
 </body>
 </html>
