@@ -44,6 +44,7 @@
   </div>
   <div id="icon" class="icon">&#9211;</div>
   <div id="msg">Toque ESTADO para consultar.</div>
+  <div id="info" class="hint" style="margin:-12px 0 16px;font-size:14px;opacity:.85"></div>
   <button id="on">ACTIVAR (2 min)</button>
   <button id="off">DESACTIVAR</button>
   <button id="st">ESTADO</button>
@@ -166,6 +167,17 @@ async function build(d, nonce, cmd, arg, newPin) {
   return { data, mac };
 }
 
+// Linea de estado del equipo: corriente, bateria, modo ahorro y antiguedad del dato.
+function showInfo(j) {
+  const p = [];
+  if (j && j.ac === 0) p.push('SIN CORRIENTE: funciona con bateria');
+  else if (j && j.ac === 1) p.push('Corriente OK');
+  if (j && typeof j.soc === 'number' && j.soc >= 0 && j.soc <= 100) p.push('Bateria ' + j.soc + ' %' + (j.vb ? ' (' + j.vb + ' V)' : ''));
+  if (j && j.bm) p.push('modo ahorro: WiFi 90 s cada 20 min; para abrir ahora use Bluetooth');
+  if (j && j.ts) { const m = Math.round((Date.now() / 1000 - j.ts) / 60); if (m > 2) p.push('dato de hace ' + m + ' min'); }
+  $('info').textContent = p.join(' | ');
+}
+
 function show(on, left, ok, cmd) {
   clearInterval(countdown);
   $('icon').className = 'icon' + (on ? ' on' : '');
@@ -186,9 +198,17 @@ function sendNet(d, cmd, arg, newPin) {
   const [url, user, pass] = parts, base = d.base;
   return new Promise((resolve, reject) => {
     const c = mqtt.connect(url, { username: user, password: pass, reconnectPeriod: 0, connectTimeout: 8000 });
-    let sent = false;
+    let sent = false, retained = null;
     const fin = (fn, v) => { clearTimeout(timer); c.end(true); fn(v); };
-    const timer = setTimeout(() => fin(reject, new Error('El dispositivo no responde (sin internet o apagado).')), 15000);
+    const timer = setTimeout(() => {
+      let m = 'El dispositivo no responde (sin internet o apagado).';
+      if (retained) {
+        showInfo(retained);
+        if (retained.bm) m = 'El equipo esta en modo ahorro (bateria) y no escucha ahora. Use Bluetooth para abrir.';
+        else if (retained.ac === 0) m += ' Estaba sin corriente.';
+      }
+      fin(reject, new Error(m));
+    }, 15000);
     c.on('connect', () => c.subscribe([`${base}/nonce`, `${base}/status`]));
     c.on('error', e => fin(reject, e));
     c.on('message', async (topic, payload, packet) => {
@@ -197,8 +217,11 @@ function sendNet(d, cmd, arg, newPin) {
         sent = true;
         const { data, mac } = await build(d, fromHex(s), cmd, arg, newPin);
         c.publish(`${base}/cmd`, `${d.uid}:${cmd}:${arg}:${toHex(data)}:${toHex(mac)}`);
-      } else if (topic === `${base}/status` && sent && !packet.retain) {
-        fin(resolve, JSON.parse(s));
+      } else if (topic === `${base}/status`) {
+        let j = null;
+        try { j = JSON.parse(s); } catch (e) { return; }
+        if (packet.retain) { retained = j; showInfo(j); }
+        else if (sent) fin(resolve, j);
       }
     });
   });
@@ -226,7 +249,12 @@ async function sendBle(d, cmd, arg, newPin) {
     payload[0] = d.uid; payload[1] = cmd; payload[2] = arg; payload.set(data, 3); payload.set(mac, 11);
     await (await svc.getCharacteristic(CMD)).writeValue(payload);
     const st = await (await svc.getCharacteristic(STAT)).readValue();
-    return { on: st.getUint8(0), left: st.byteLength > 1 ? st.getUint8(1) : 0, ok: 1 };
+    const r = { on: st.getUint8(0), left: st.byteLength > 1 ? st.getUint8(1) : 0, ok: 1 };
+    if (st.byteLength > 3) {            // [on][seg][flags: bit0 corriente, bit1 ahorro][bateria %]
+      const f = st.getUint8(2), soc = st.getUint8(3);
+      r.ac = f & 1 ? 1 : 0; r.bm = f & 2 ? 1 : 0; r.soc = soc === 255 ? -1 : soc;
+    }
+    return r;
   } finally {
     try { if (bleDevice.gatt.connected) bleDevice.gatt.disconnect(); } catch (e) {}
   }
@@ -241,6 +269,7 @@ async function send(cmd, arg = 0, newPin = '') {
     setMsg(mode() === 'net' ? 'Conectando por Internet...' : 'Buscando por Bluetooth...');
     const r = mode() === 'net' ? await sendNet(d, cmd, arg, newPin) : await sendBle(d, cmd, arg, newPin);
     show(!!r.on, r.left, !!r.ok, cmd);
+    showInfo(r);
   } catch (e) {
     if (e.name === 'NotFoundError') bleDevice = null;
     setMsg(e.name === 'NotFoundError' ? 'Cancelado o no encontrado. Acerquese.' : 'Error: ' + (e.message || e));
