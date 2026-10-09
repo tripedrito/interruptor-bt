@@ -32,6 +32,9 @@
   label.f { display:block; margin:8px 0 4px; }
   input, textarea, select { width:100%; box-sizing:border-box; font-size:16px; padding:8px; }
   .hint { font-size:12px; opacity:.7; }
+  #info { white-space:pre-line; line-height:1.5; }
+  #histlist div { padding:4px 0; border-bottom:1px solid rgba(128,128,128,.25); }
+  #histlist b { font-weight:600; }
 </style>
 </head>
 <body>
@@ -48,6 +51,10 @@
   <button id="on">ACTIVAR (2 min)</button>
   <button id="off">DESACTIVAR</button>
   <button id="st">ESTADO</button>
+  <details id="hist">
+    <summary>Historial del equipo</summary>
+    <div id="histlist" class="hint" style="font-size:14px;opacity:.9">Toque ESTADO para actualizar.</div>
+  </details>
   <details id="cfg">
     <summary>Configuracion</summary>
     <label class="f" for="broker">Servidor (url|usuario|clave)</label>
@@ -167,15 +174,104 @@ async function build(d, nonce, cmd, arg, newPin) {
   return { data, mac };
 }
 
-// Linea de estado del equipo: corriente, bateria, modo ahorro y antiguedad del dato.
+// ---------- Estado del equipo: fuente (CDE/BAT), bateria y horas, WiFi de ahorro, red usada ----------
+const hhmm = ts => new Date(ts * 1000).toLocaleTimeString('es-DO', { hour: 'numeric', minute: '2-digit' });
+const fecha = ts => ts ? new Date(ts * 1000).toLocaleString('es-DO', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) : '(hora desconocida)';
+function dur(h) {                           // horas -> "2 h 30 min" / "3,8 dias"
+  if (h >= 48) return (h / 24).toFixed(1).replace('.', ',') + ' dias';
+  const m = Math.round(h * 60);
+  return m >= 60 ? Math.floor(m / 60) + ' h ' + (m % 60 ? (m % 60) + ' min' : '') : m + ' min';
+}
 function showInfo(j) {
-  const p = [];
-  if (j && j.ac === 0) p.push('SIN CORRIENTE: funciona con bateria');
-  else if (j && j.ac === 1) p.push('Corriente OK');
-  if (j && typeof j.soc === 'number' && j.soc >= 0 && j.soc <= 100) p.push('Bateria ' + j.soc + ' %' + (j.vb ? ' (' + j.vb + ' V)' : ''));
-  if (j && j.bm) p.push('modo ahorro: WiFi 90 s cada 20 min; para abrir ahora use Bluetooth');
-  if (j && j.ts) { const m = Math.round((Date.now() / 1000 - j.ts) / 60); if (m > 2) p.push('dato de hace ' + m + ' min'); }
-  $('info').textContent = p.join(' | ');
+  if (!j) { $('info').textContent = ''; return; }
+  const L = [], hs = j.hs === undefined ? 3 : j.hs, now = Date.now() / 1000;
+  if (!(hs & 1)) L.push('Fuente: sin sensor de corriente (no se puede saber si hay red electrica)');
+  else if (j.ac === 0) L.push('Fuente: BAT (sin corriente, funciona con bateria)');
+  else if (j.ac === 1) L.push('Fuente: CDE (conectado a la red electrica)');
+  if ((hs & 2) && typeof j.soc === 'number' && j.soc >= 0 && j.soc <= 100) {
+    let b = 'Bateria ' + j.soc + ' %' + (j.vb ? ' (' + j.vb + ' V)' : '');
+    if (typeof j.eta === 'number' && j.eta >= 0) b += ' | autonomia estimada ~' + dur(j.eta) + (j.ac === 1 ? ' (si se va la corriente ahora)' : '');
+    L.push(b);
+  }
+  if (j.bm) {
+    if (j.wf === 0 && j.nx) L.push('WiFi apagado por ahorro' + (j.wo ? ' desde las ' + hhmm(j.wo) : '') + '; vuelve ~' + hhmm(j.nx) + ' (en ' + Math.max(0, Math.round((j.nx - now) / 60)) + ' min). Para abrir ahora use Bluetooth');
+    else if (j.we) L.push('WiFi abierto ahora; se cierra ~' + hhmm(j.we));
+    else L.push('Modo ahorro: WiFi 90 s cada 20 min. Para abrir ahora use Bluetooth');
+  } else if (j.ac === 1) L.push('WiFi continuo');
+  if (j.net) L.push('Red WiFi: ' + j.net);
+  if (j.ts) { const m = Math.round((now - j.ts) / 60); if (m > 2) L.push('Dato de hace ' + m + ' min'); }
+  $('info').textContent = L.join('\n');
+}
+
+// Por que no responde: distingue "apago el WiFi por ahorro" de una caida real.
+function explainOffline(j, name) {
+  const now = Date.now() / 1000;
+  if (!j) return 'El equipo no ha reportado nunca (apagado o sin configurar).';
+  if (j.wf === 0 && j.nx) {
+    if (now < j.nx + 180) return 'No es una falla: el equipo apago el WiFi para ahorrar bateria' + (j.wo ? ' a las ' + hhmm(j.wo) : '') + ' y lo vuelve a encender ~' + hhmm(j.nx) + ' (en ' + Math.max(0, Math.round((j.nx - now) / 60)) + ' min). Para abrir ahora use Bluetooth.';
+    return 'Debia reconectarse a las ' + hhmm(j.nx) + ' y no lo hizo. Puede que el negocio no tenga internet o que la bateria se agotara. Pruebe Bluetooth.';
+  }
+  let m = 'El equipo se desconecto sin avisar' + (j.ts ? ' (ultimo dato a las ' + hhmm(j.ts) + ')' : '') + '. ';
+  if (j.ac === 0) m += 'Estaba con bateria' + (typeof j.soc === 'number' && j.soc >= 0 ? ' al ' + j.soc + ' %' : '') + ': puede que se agotara. ';
+  else m += 'Estaba con corriente: lo mas probable es que se cayo internet o el router del negocio (o se apago el equipo). ';
+  return m + 'Pruebe Bluetooth o conectese a la red de emergencia Int-' + (name || '') + '.';
+}
+
+// Historial: codigos del firmware
+const EVT = {
+  1: x => 'Se fue la corriente: paso a bateria',
+  2: x => 'Volvio la corriente',
+  3: x => 'Ahorro de bateria: WiFi se apaga y enciende cada 20 min (' + x + ' ciclo' + (x === 1 ? '' : 's') + ')',
+  5: x => 'Se cayo internet (con corriente)',
+  6: x => 'Internet restablecido',
+  7: x => 'Cambio a la red WiFi de respaldo n.º ' + (x + 1),
+  8: x => 'El equipo se reinicio' + (x === 1 ? ' (encendido)' : x === 9 ? ' (falta de voltaje)' : ' (causa ' + x + ')'),
+  9: x => 'Se activo la red de emergencia'
+};
+function showLog(arr) {
+  const box = $('histlist');
+  if (!Array.isArray(arr) || !arr.length) { box.textContent = 'Sin eventos registrados.'; return; }
+  box.innerHTML = '';
+  arr.slice().reverse().forEach(e => {
+    const dv = document.createElement('div'), b = document.createElement('b');
+    b.textContent = fecha(e[0]) + ' - ';
+    dv.appendChild(b);
+    dv.appendChild(document.createTextNode((EVT[e[1]] || ('Evento ' + e[1]))(e[2])));
+    box.appendChild(dv);
+  });
+}
+
+// Lee el ultimo estado guardado en el servidor SIN enviar ordenes (no hace falta que el equipo este conectado).
+function peekNet(d) {
+  const parts = ($('broker').value || '').split('|').map(s => s.trim());
+  if (parts.length !== 3 || !parts[0]) return Promise.resolve(null);
+  const [url, user, pass] = parts, base = d.base;
+  return new Promise(resolve => {
+    const c = mqtt.connect(url, { username: user, password: pass, reconnectPeriod: 0, connectTimeout: 6000 });
+    const r = { j: null, onl: null, log: null };
+    const fin = () => { clearTimeout(t); try { c.end(true); } catch (e) {} resolve(r); };
+    const t = setTimeout(fin, 3500);
+    c.on('connect', () => c.subscribe([`${base}/status`, `${base}/online`, `${base}/log`]));
+    c.on('error', fin);
+    c.on('message', (topic, payload) => {
+      const s = payload.toString();
+      try {
+        if (topic.endsWith('/status')) r.j = JSON.parse(s);
+        else if (topic.endsWith('/online')) r.onl = s;
+        else if (topic.endsWith('/log')) r.log = JSON.parse(s);
+      } catch (e) {}
+    });
+  });
+}
+async function refresh() {
+  const d = currentDev();
+  if (!d || busy || mode() !== 'net') return;
+  const r = await peekNet(d);
+  if (!r || busy || !r.j) return;
+  showInfo(r.j);
+  if (r.log) showLog(r.log);
+  if (r.onl === '0') setMsg(explainOffline(r.j, d.name));
+  else if (r.onl === '1') setMsg('Equipo en linea.');
 }
 
 function show(on, left, ok, cmd) {
@@ -198,25 +294,36 @@ function sendNet(d, cmd, arg, newPin) {
   const [url, user, pass] = parts, base = d.base;
   return new Promise((resolve, reject) => {
     const c = mqtt.connect(url, { username: user, password: pass, reconnectPeriod: 0, connectTimeout: 8000 });
-    let sent = false, retained = null;
+    let sent = false, retained = null, onl = null, nonceHex = null, decided = false;
     const fin = (fn, v) => { clearTimeout(timer); c.end(true); fn(v); };
     const timer = setTimeout(() => {
       let m = 'El dispositivo no responde (sin internet o apagado).';
-      if (retained) {
-        showInfo(retained);
-        if (retained.bm) m = 'El equipo esta en modo ahorro (bateria) y no escucha ahora. Use Bluetooth para abrir.';
-        else if (retained.ac === 0) m += ' Estaba sin corriente.';
-      }
+      if (retained) { showInfo(retained); m = explainOffline(retained, d.name); }
       fin(reject, new Error(m));
     }, 15000);
-    c.on('connect', () => c.subscribe([`${base}/nonce`, `${base}/status`]));
+    // Primero se mira si el equipo esta en linea; si no, se explica por que sin esperar 15 s.
+    const trySend = async () => {
+      if (sent || !nonceHex) return;
+      if (!decided) return;
+      sent = true;
+      const { data, mac } = await build(d, fromHex(nonceHex), cmd, arg, newPin);
+      c.publish(`${base}/cmd`, `${d.uid}:${cmd}:${arg}:${toHex(data)}:${toHex(mac)}`);
+    };
+    const decide = () => {
+      if (decided) return;
+      decided = true;
+      if (onl === '0') { if (retained) showInfo(retained); fin(reject, new Error(explainOffline(retained, d.name))); }
+      else trySend();
+    };
+    c.on('connect', () => { c.subscribe([`${base}/nonce`, `${base}/status`, `${base}/online`, `${base}/log`]); setTimeout(decide, 1500); });
     c.on('error', e => fin(reject, e));
     c.on('message', async (topic, payload, packet) => {
       const s = payload.toString();
-      if (topic === `${base}/nonce` && !sent) {
-        sent = true;
-        const { data, mac } = await build(d, fromHex(s), cmd, arg, newPin);
-        c.publish(`${base}/cmd`, `${d.uid}:${cmd}:${arg}:${toHex(data)}:${toHex(mac)}`);
+      if (topic === `${base}/online`) { onl = s; decide(); }
+      else if (topic === `${base}/log`) { try { showLog(JSON.parse(s)); } catch (e) {} }
+      else if (topic === `${base}/nonce` && !sent) {
+        nonceHex = s;
+        trySend();
       } else if (topic === `${base}/status`) {
         let j = null;
         try { j = JSON.parse(s); } catch (e) { return; }
@@ -250,9 +357,15 @@ async function sendBle(d, cmd, arg, newPin) {
     await (await svc.getCharacteristic(CMD)).writeValue(payload);
     const st = await (await svc.getCharacteristic(STAT)).readValue();
     const r = { on: st.getUint8(0), left: st.byteLength > 1 ? st.getUint8(1) : 0, ok: 1 };
-    if (st.byteLength > 3) {            // [on][seg][flags: bit0 corriente, bit1 ahorro][bateria %]
+    if (st.byteLength > 3) {            // [on][seg][flags: bit0 corriente, bit1 ahorro][bateria %][horas][min a proximo WiFi, 2 bytes]
       const f = st.getUint8(2), soc = st.getUint8(3);
       r.ac = f & 1 ? 1 : 0; r.bm = f & 2 ? 1 : 0; r.soc = soc === 255 ? -1 : soc;
+      r.hs = soc === 255 ? 0 : 3;       // sin lectura de bateria = sin sensores
+      if (st.byteLength >= 7) {
+        const e = st.getUint8(4), nm = st.getUint16(5, true);
+        r.eta = e === 255 ? -1 : e;
+        if (nm !== 65535) { r.wf = 0; r.nx = Date.now() / 1000 + nm * 60; }
+      }
     }
     return r;
   } finally {
@@ -299,6 +412,9 @@ $('deluser').onclick = () => {
   if (confirm('Eliminar el usuario ' + n + ' de ' + currentDev().name + '?')) send(DELUSER, n);
 };
 load();
+refresh();
+$('dev').addEventListener('change', () => setTimeout(refresh, 50));
+document.addEventListener('visibilitychange', () => { if (!document.hidden && !busy) refresh(); });
 if (importedNow) setMsg('Configuracion importada. Ya puede usar la app.');
 </script>
 </body>
