@@ -5,8 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Interruptor planta</title>
 <link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="icon-192.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
-<meta name="theme-color" content="#3949ab">
+<meta name="theme-color" content="#0b0d10">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Interruptor">
@@ -17,12 +18,21 @@
   body { margin:0; font-family:system-ui,sans-serif; background:var(--bg); color:var(--fg); }
   main { max-width:420px; margin:0 auto; padding:24px 16px; text-align:center; }
   h1 { font-size:20px; margin:0 0 8px; }
-  .icon { font-size:96px; line-height:1.2; color:gray; }
-  .icon.on { color:var(--ok); }
+  /* Boton de encendido: negro = apagado, azul iluminado = activado, gris punteado = estado desconocido */
+  .icon { display:block; width:168px; height:168px; margin:14px auto 10px; padding:0; border-radius:50%; border:3px solid #3a3f47;
+          background:#0b0d10; cursor:pointer; position:relative; -webkit-tap-highlight-color:transparent; touch-action:manipulation;
+          user-select:none; -webkit-user-select:none; transition:background .25s, box-shadow .25s, border-color .25s; }
+  .icon svg { width:96px; height:96px; fill:none; stroke:#5d636d; stroke-width:9; stroke-linecap:round; transition:stroke .25s; pointer-events:none; }
+  .icon.on { background:#1f6bff; border-color:#a9c9ff; box-shadow:0 0 34px 10px rgba(50,130,255,.65), inset 0 0 24px rgba(255,255,255,.25); animation:glow 2.4s ease-in-out infinite; }
+  .icon.on svg { stroke:#fff; }
+  .icon.unk { background:#2a2e35; border-style:dashed; border-color:#59606b; }
+  .icon.unk svg { stroke:#9aa1ad; }
+  .icon.holding { animation:ring .7s linear forwards; }
+  .icon:disabled { opacity:.6; }
+  @keyframes glow { 0%,100% { box-shadow:0 0 28px 8px rgba(50,130,255,.55), inset 0 0 22px rgba(255,255,255,.2); } 50% { box-shadow:0 0 44px 14px rgba(70,150,255,.8), inset 0 0 26px rgba(255,255,255,.3); } }
+  @keyframes ring { from { box-shadow:0 0 0 0 rgba(47,123,255,0); } to { box-shadow:0 0 0 12px rgba(47,123,255,.9); } }
   #msg { min-height:48px; font-size:18px; margin:8px 0 24px; }
   button { width:100%; padding:18px; margin:8px 0; font-size:22px; border-radius:14px; border:2px solid var(--acc); }
-  #on { background:var(--acc); color:#fff; }
-  #off { background:transparent; color:var(--acc); }
   #st { font-size:16px; padding:10px; border:0; background:none; color:var(--acc); }
   button:disabled { opacity:.5; }
   .modes { display:flex; gap:8px; justify-content:center; margin:8px 0; }
@@ -45,11 +55,12 @@
     <label><input type="radio" name="mode" value="net" checked> Internet</label>
     <label><input type="radio" name="mode" value="ble"> Bluetooth</label>
   </div>
-  <div id="icon" class="icon">&#9211;</div>
+  <button id="icon" class="icon unk" aria-label="Encender o apagar">
+    <svg viewBox="0 0 100 100" aria-hidden="true"><path d="M50 10 V50"/><path d="M26.4 29.9 A34 34 0 1 0 73.6 29.9"/></svg>
+  </button>
+  <div class="hint" style="margin:0 0 6px">Mantenga presionado 1 segundo para ACTIVAR (2 min). Toque para DESACTIVAR.</div>
   <div id="msg">Toque ESTADO para consultar.</div>
   <div id="info" class="hint" style="margin:-12px 0 16px;font-size:14px;opacity:.85"></div>
-  <button id="on">ACTIVAR (2 min)</button>
-  <button id="off">DESACTIVAR</button>
   <button id="st">ESTADO</button>
   <details id="hist">
     <summary>Historial del equipo</summary>
@@ -116,7 +127,7 @@ function load() {
 }
 function mode() { return document.querySelector('input[name=mode]:checked').value; }
 document.querySelectorAll('input[name=mode]').forEach(r => r.onchange = () => store.set('mode', mode()));
-$('dev').onchange = () => { store.set('dev', $('dev').value); bleDevice = null; $('icon').className = 'icon'; clearInterval(countdown); setMsg('Toque ESTADO para consultar.'); };
+$('dev').onchange = () => { store.set('dev', $('dev').value); bleDevice = null; setPower('unk'); clearInterval(countdown); setMsg('Toque ESTADO para consultar.'); };
 $('save').onclick = () => {
   store.set('broker', $('broker').value.trim()); store.set('devs', $('devs').value.trim());
   fillSelect();
@@ -150,7 +161,9 @@ if (location.hash.startsWith('#cfg=')) {
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 
 function setMsg(t) { $('msg').textContent = t; }
-function setBusy(b) { busy = b; ['on','off','st'].forEach(i => $(i).disabled = b); }
+function setBusy(b) { busy = b; ['icon','st'].forEach(i => $(i).disabled = b); }
+function setPower(s) { $('icon').className = 'icon ' + s; }             // 'on' azul iluminado, 'off' negro, 'unk' gris (no se sabe)
+const powerState = () => $('icon').classList.contains('on') ? 'on' : $('icon').classList.contains('off') ? 'off' : 'unk';
 
 const toHex = u8 => [...u8].map(b => b.toString(16).padStart(2, '0')).join('');
 const fromHex = h => Uint8Array.from(h.match(/../g).map(x => parseInt(x, 16)));
@@ -277,13 +290,17 @@ async function refresh() {
   if (!r || busy || !r.j) return;
   showInfo(r.j);
   if (r.log) showLog(r.log);
+  const fresco = r.onl === '1' || recienteEnLinea(r.j);
+  if (!fresco) setPower('unk');
+  else if (r.j.on && r.j.left && r.j.ts && (Date.now() / 1000 - r.j.ts) < r.j.left) setPower('on');
+  else setPower('off');
   if (r.onl === '0' && !recienteEnLinea(r.j)) setMsg(explainOffline(r.j, d.name));
   else if (r.onl === '1' || r.onl === '0') setMsg('Equipo en linea.');
 }
 
 function show(on, left, ok, cmd) {
   clearInterval(countdown);
-  $('icon').className = 'icon' + (on ? ' on' : '');
+  setPower(on ? 'on' : 'off');
   if (cmd === SETPIN || cmd === DELUSER) { setMsg(ok ? 'Listo: el cambio se aplico.' : 'No autorizado (revise que sea el administrador y el PIN).'); return; }
   const expected = cmd === ON ? true : cmd === OFF ? false : on;
   if (!ok || on !== expected) { setMsg('PIN o usuario incorrectos (o bloqueado 60 s).'); return; }
@@ -291,7 +308,7 @@ function show(on, left, ok, cmd) {
   let t = left;
   const draw = () => setMsg(`ACTIVADO: se desactiva solo en ${Math.floor(t/60)}:${String(t%60).padStart(2,'0')}`);
   draw();
-  countdown = setInterval(() => { t--; if (t <= 0) { clearInterval(countdown); setMsg('Tiempo cumplido: DESACTIVADO.'); $('icon').className = 'icon'; } else draw(); }, 1000);
+  countdown = setInterval(() => { t--; if (t <= 0) { clearInterval(countdown); setMsg('Tiempo cumplido: DESACTIVADO.'); setPower('off'); } else draw(); }, 1000);
 }
 
 // ---------- Internet (MQTT por WebSocket) ----------
@@ -395,8 +412,27 @@ async function send(cmd, arg = 0, newPin = '') {
     setMsg(e.name === 'NotFoundError' ? 'Cancelado o no encontrado. Acerquese.' : 'Error: ' + (e.message || e));
   } finally { setBusy(false); }
 }
-$('on').onclick  = () => send(ON);
-$('off').onclick = () => send(OFF);
+// El icono es el boton: mantener 0,7 s = ACTIVAR (evita activar por un toque accidental); tocar con el equipo activado = DESACTIVAR.
+let holdT = null, held = false;
+$('icon').addEventListener('pointerdown', () => {
+  held = false;
+  if (busy || powerState() === 'on') return;
+  $('icon').classList.add('holding');
+  holdT = setTimeout(() => {
+    held = true; $('icon').classList.remove('holding');
+    if (navigator.vibrate) navigator.vibrate(40);
+    send(ON);
+  }, 700);
+});
+['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => $('icon').addEventListener(ev, () => { clearTimeout(holdT); $('icon').classList.remove('holding'); }));
+$('icon').addEventListener('click', e => {
+  if (held) { held = false; return; }                     // el click que sigue a una pulsacion larga
+  if (busy) return;
+  if (powerState() === 'on') { send(OFF); return; }
+  if (e.detail === 0) { if (confirm('Activar por 2 minutos?')) send(ON); return; }   // con el teclado
+  setMsg('Mantenga presionado el boton 1 segundo para ACTIVAR.');
+});
+$('icon').addEventListener('contextmenu', e => e.preventDefault());
 $('st').onclick  = () => send(STATUS);
 
 // ---------- Administracion ----------

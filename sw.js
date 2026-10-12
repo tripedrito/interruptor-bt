@@ -1,5 +1,5 @@
 // Service worker: la pagina abre aunque no haya internet (usa la ultima copia guardada).
-const CACHE = 'interruptor-v3';
+const CACHE = 'interruptor-v4';
 const FILES = ['./', './index.html', './mqtt.min.js', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
