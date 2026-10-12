@@ -186,8 +186,8 @@ function showInfo(j) {
   if (!j) { $('info').textContent = ''; return; }
   const L = [], hs = j.hs === undefined ? 3 : j.hs, now = Date.now() / 1000;
   if (!(hs & 1)) L.push('Fuente: sin sensor de corriente (no se puede saber si hay red electrica)');
-  else if (j.ac === 0) L.push('Fuente: BAT (sin corriente, funciona con bateria)');
-  else if (j.ac === 1) L.push('Fuente: CDE (conectado a la red electrica)');
+  else if (j.ac === 0) L.push('Fuente: BATERIAS');
+  else if (j.ac === 1) L.push('Fuente: CDE ');
   if ((hs & 2) && typeof j.soc === 'number' && j.soc >= 0 && j.soc <= 100) {
     let b = 'Bateria ' + j.soc + ' %' + (j.vb ? ' (' + j.vb + ' V)' : '');
     if (typeof j.eta === 'number' && j.eta >= 0) b += ' | autonomia estimada ~' + dur(j.eta) + (j.ac === 1 ? ' (si se va la corriente ahora)' : '');
@@ -198,7 +198,8 @@ function showInfo(j) {
     else if (j.we) L.push('WiFi abierto ahora; se cierra ~' + hhmm(j.we));
     else L.push('Modo ahorro: WiFi 90 s cada 20 min. Para abrir ahora use Bluetooth');
   } else if (j.ac === 1) L.push('WiFi continuo');
-  if (j.net) L.push('Red WiFi: ' + j.net);
+  if (j.net) L.push('Red WiFi: ' + j.net + (j.rs ? ' (senal ' + j.rs + ' dBm)' : ''));
+  if (typeof j.md === 'number') L.push('Diagnostico: caidas de MQTT ' + j.md + ', de WiFi ' + j.wd + (j.hp ? ' | memoria libre ' + j.hp + ' KB (minima ' + j.mh + ')' : '') + (j.up ? ' | encendido hace ' + dur(j.up / 3600) : ''));
   if (j.ts) { const m = Math.round((now - j.ts) / 60); if (m > 2) L.push('Dato de hace ' + m + ' min'); }
   $('info').textContent = L.join('\n');
 }
@@ -215,6 +216,12 @@ function explainOffline(j, name) {
   if (j.ac === 0) m += 'Estaba con bateria' + (typeof j.soc === 'number' && j.soc >= 0 ? ' al ' + j.soc + ' %' : '') + ': puede que se agotara. ';
   else m += 'Estaba con corriente: lo mas probable es que se cayo internet o el router del negocio (o se apago el equipo). ';
   return m + 'Pruebe Bluetooth o conectese a la red de emergencia Int-' + (name || '') + '.';
+}
+
+// El aviso "en linea = 0" del servidor puede quedar viejo (llega tarde cuando el equipo se reconecta).
+// Con corriente el equipo manda su estado cada 5 min: si el ultimo estado es reciente y no es un apagado de WiFi por ahorro, esta en linea.
+function recienteEnLinea(j) {
+  return !!(j && j.ts && j.wf !== 0 && (Date.now() / 1000 - j.ts) < 8 * 60);
 }
 
 // Historial: codigos del firmware
@@ -270,8 +277,8 @@ async function refresh() {
   if (!r || busy || !r.j) return;
   showInfo(r.j);
   if (r.log) showLog(r.log);
-  if (r.onl === '0') setMsg(explainOffline(r.j, d.name));
-  else if (r.onl === '1') setMsg('Equipo en linea.');
+  if (r.onl === '0' && !recienteEnLinea(r.j)) setMsg(explainOffline(r.j, d.name));
+  else if (r.onl === '1' || r.onl === '0') setMsg('Equipo en linea.');
 }
 
 function show(on, left, ok, cmd) {
@@ -312,14 +319,14 @@ function sendNet(d, cmd, arg, newPin) {
     const decide = () => {
       if (decided) return;
       decided = true;
-      if (onl === '0') { if (retained) showInfo(retained); fin(reject, new Error(explainOffline(retained, d.name))); }
+      if (onl === '0' && !recienteEnLinea(retained)) { if (retained) showInfo(retained); fin(reject, new Error(explainOffline(retained, d.name))); }
       else trySend();
     };
     c.on('connect', () => { c.subscribe([`${base}/nonce`, `${base}/status`, `${base}/online`, `${base}/log`]); setTimeout(decide, 1500); });
     c.on('error', e => fin(reject, e));
     c.on('message', async (topic, payload, packet) => {
       const s = payload.toString();
-      if (topic === `${base}/online`) { onl = s; decide(); }
+      if (topic === `${base}/online`) { onl = s; if (s === '1') decide(); else setTimeout(decide, 700); }   // con '0' se espera un momento al estado para ver si es un aviso viejo
       else if (topic === `${base}/log`) { try { showLog(JSON.parse(s)); } catch (e) {} }
       else if (topic === `${base}/nonce` && !sent) {
         nonceHex = s;
