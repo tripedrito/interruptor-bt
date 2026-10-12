@@ -45,6 +45,13 @@
   #info { white-space:pre-line; line-height:1.5; }
   #histlist div { padding:4px 0; border-bottom:1px solid rgba(128,128,128,.25); }
   #histlist b { font-weight:600; }
+  /* Aviso grande de cuando vuelve la conexion (cuenta regresiva) */
+  .wifi { margin:8px 0 14px; padding:12px 10px; border-radius:14px; background:var(--card); border:2px solid #f0a020; font-size:20px; }
+  .wifi b { font-size:34px; font-variant-numeric:tabular-nums; display:block; line-height:1.2; }
+  .wifi small { display:block; font-size:14px; opacity:.8; }
+  .wifi.open { border-color:#2f7bff; }
+  .wifi.late { border-color:#d33; }
+  .wifi[hidden] { display:none; }
 </style>
 </head>
 <body>
@@ -58,12 +65,14 @@
   <button id="icon" class="icon unk" aria-label="Encender o apagar">
     <svg viewBox="0 0 100 100" aria-hidden="true"><path d="M50 10 V50"/><path d="M26.4 29.9 A34 34 0 1 0 73.6 29.9"/></svg>
   </button>
-  <div class="hint" style="margin:0 0 6px">Mantenga presionado 1 segundo para ACTIVAR (2 min). Toque para DESACTIVAR.</div>
+  <div class="hint" style="margin:0 0 6px">Mantenga presionado para ACTIVAR (2 min). Toque para DESACTIVAR.</div>
+  <div id="wifi" class="wifi" hidden></div>
   <div id="msg">Toque ESTADO para consultar.</div>
   <div id="info" class="hint" style="margin:-12px 0 16px;font-size:14px;opacity:.85"></div>
   <button id="st">ESTADO</button>
   <details id="hist">
-    <summary>Historial del equipo</summary>
+    <summary>Detalles tecnicos</summary>
+    <div id="diag" class="hint" style="font-size:14px;opacity:.9;white-space:pre-line;margin:6px 0"></div>
     <div id="histlist" class="hint" style="font-size:14px;opacity:.9">Toque ESTADO para actualizar.</div>
   </details>
   <details id="cfg">
@@ -195,40 +204,56 @@ function dur(h) {                           // horas -> "2 h 30 min" / "3,8 dias
   const m = Math.round(h * 60);
   return m >= 60 ? Math.floor(m / 60) + ' h ' + (m % 60 ? (m % 60) + ' min' : '') : m + ' min';
 }
+let lastJ = null, lastRefresh = 0;
+const mmss = s => (s >= 3600 ? Math.floor(s / 3600) + ':' + String(Math.floor(s % 3600 / 60)).padStart(2, '0') : Math.floor(s / 60)) + ':' + String(s % 60).padStart(2, '0');
+
+// Linea corta de estado (lo esencial) + detalles tecnicos en un desplegable cerrado.
 function showInfo(j) {
   if (!j) { $('info').textContent = ''; return; }
-  const L = [], hs = j.hs === undefined ? 3 : j.hs, now = Date.now() / 1000;
-  if (!(hs & 1)) L.push('Fuente: sin sensor de corriente (no se puede saber si hay red electrica)');
+  lastJ = j;
+  const L = [], hs = j.hs === undefined ? 3 : j.hs;
+  if (!(hs & 1)) L.push('Sin sensor de corriente');
   else if (j.ac === 0) L.push('Fuente: BATERIAS');
-  else if (j.ac === 1) L.push('Fuente: CDE ');
+  else if (j.ac === 1) L.push('Fuente: CDE');
   if ((hs & 2) && typeof j.soc === 'number' && j.soc >= 0 && j.soc <= 100) {
-    let b = 'Bateria ' + j.soc + ' %' + (j.vb ? ' (' + j.vb + ' V)' : '');
-    if (typeof j.eta === 'number' && j.eta >= 0) b += ' | autonomia estimada ~' + dur(j.eta) + (j.ac === 1 ? ' (si se va la corriente ahora)' : '');
+    let b = 'Bateria ' + j.soc + ' %';
+    if (j.ac === 0 && typeof j.eta === 'number' && j.eta >= 0) b += ' (dura ~' + dur(j.eta) + ')';
     L.push(b);
   }
-  if (j.bm) {
-    if (j.wf === 0 && j.nx) L.push('WiFi apagado por ahorro' + (j.wo ? ' desde las ' + hhmm(j.wo) : '') + '; vuelve ~' + hhmm(j.nx) + ' (en ' + Math.max(0, Math.round((j.nx - now) / 60)) + ' min). Para abrir ahora use Bluetooth');
-    else if (j.we) L.push('WiFi abierto ahora; se cierra ~' + hhmm(j.we));
-    else L.push('Modo ahorro: WiFi 90 s cada 20 min. Para abrir ahora use Bluetooth');
-  } else if (j.ac === 1) L.push('WiFi continuo');
-  if (j.net) L.push('Red WiFi: ' + j.net + (j.rs ? ' (senal ' + j.rs + ' dBm)' : ''));
-  if (typeof j.md === 'number') L.push('Diagnostico: caidas de MQTT ' + j.md + ', de WiFi ' + j.wd + (j.hp ? ' | memoria libre ' + j.hp + ' KB (minima ' + j.mh + ')' : '') + (j.up ? ' | encendido hace ' + dur(j.up / 3600) : ''));
-  if (j.ts) { const m = Math.round((now - j.ts) / 60); if (m > 2) L.push('Dato de hace ' + m + ' min'); }
-  $('info').textContent = L.join('\n');
+  $('info').textContent = L.join('  |  ');
+  const D = [];
+  if (j.net) D.push('Red WiFi: ' + j.net + (j.rs ? ' (' + j.rs + ' dBm)' : ''));
+  if (typeof j.md === 'number') D.push('Caidas de MQTT ' + j.md + ', de WiFi ' + j.wd + (j.hp ? ' | memoria libre ' + j.hp + ' KB (minima ' + j.mh + ')' : '') + (j.up ? ' | encendido hace ' + dur(j.up / 3600) : ''));
+  if (j.vb) D.push('Voltaje de bateria: ' + j.vb + ' V');
+  if (j.ts) D.push('Ultimo dato: ' + fecha(j.ts));
+  $('diag').textContent = D.join('\n');
+  renderWifi();
 }
 
-// Por que no responde: distingue "apago el WiFi por ahorro" de una caida real.
-function explainOffline(j, name) {
-  const now = Date.now() / 1000;
-  if (!j) return 'El equipo no ha reportado nunca (apagado o sin configurar).';
-  if (j.wf === 0 && j.nx) {
-    if (now < j.nx + 180) return 'No es una falla: el equipo apago el WiFi para ahorrar bateria' + (j.wo ? ' a las ' + hhmm(j.wo) : '') + ' y lo vuelve a encender ~' + hhmm(j.nx) + ' (en ' + Math.max(0, Math.round((j.nx - now) / 60)) + ' min). Para abrir ahora use Bluetooth.';
-    return 'Debia reconectarse a las ' + hhmm(j.nx) + ' y no lo hizo. Puede que el negocio no tenga internet o que la bateria se agotara. Pruebe Bluetooth.';
+// Aviso grande: cuando vuelve la conexion (cuenta regresiva) o hasta cuando esta abierta.
+function renderWifi() {
+  const el = $('wifi'), j = lastJ, now = Date.now() / 1000;
+  let html = '', cls = 'wifi';
+  if (j && j.bm && j.wf === 0 && j.nx) {
+    const s = Math.round(j.nx - now);
+    if (s > 0) html = 'Internet vuelve en <b>' + mmss(s) + '</b><small>a las ' + hhmm(j.nx) + '</small>';
+    else if (s > -180) { html = 'Conectando...<small>espere unos segundos</small>'; if (Date.now() - lastRefresh > 10000 && !busy && mode() === 'net') refresh(); }
+    else { cls += ' late'; html = 'Sin conexion<small>debia volver a las ' + hhmm(j.nx) + '. Use Bluetooth</small>'; }
+  } else if (j && j.bm && j.we && j.we > now) {
+    cls += ' open';
+    html = 'Conexion abierta<small>se cierra en ' + mmss(Math.round(j.we - now)) + '</small>';
   }
-  let m = 'El equipo se desconecto sin avisar' + (j.ts ? ' (ultimo dato a las ' + hhmm(j.ts) + ')' : '') + '. ';
-  if (j.ac === 0) m += 'Estaba con bateria' + (typeof j.soc === 'number' && j.soc >= 0 ? ' al ' + j.soc + ' %' : '') + ': puede que se agotara. ';
-  else m += 'Estaba con corriente: lo mas probable es que se cayo internet o el router del negocio (o se apago el equipo). ';
-  return m + 'Pruebe Bluetooth o conectese a la red de emergencia Int-' + (name || '') + '.';
+  if (!html) { el.hidden = true; return; }
+  el.className = cls; el.innerHTML = html; el.hidden = false;
+}
+setInterval(renderWifi, 1000);
+setInterval(() => { if (!document.hidden && !busy && mode() === 'net') refresh(); }, 60000);
+
+// Mensaje corto cuando no hay conexion con el equipo.
+function explainOffline(j, name) {
+  if (!j) return 'Sin datos del equipo.';
+  if (j.wf === 0 && j.nx && Date.now() / 1000 < j.nx + 180) return 'Ahorro de bateria: sin Internet por ahora. Para abrir ya, use Bluetooth.';
+  return 'Sin conexion. Pruebe Bluetooth.';
 }
 
 // El aviso "en linea = 0" del servidor puede quedar viejo (llega tarde cuando el equipo se reconecta).
@@ -286,6 +311,7 @@ function peekNet(d) {
 async function refresh() {
   const d = currentDev();
   if (!d || busy || mode() !== 'net') return;
+  lastRefresh = Date.now();
   const r = await peekNet(d);
   if (!r || busy || !r.j) return;
   showInfo(r.j);
@@ -409,7 +435,7 @@ async function send(cmd, arg = 0, newPin = '') {
     showInfo(r);
   } catch (e) {
     if (e.name === 'NotFoundError') bleDevice = null;
-    setMsg(e.name === 'NotFoundError' ? 'Cancelado o no encontrado. Acerquese.' : 'Error: ' + (e.message || e));
+    setMsg(e.name === 'NotFoundError' ? 'Cancelado o no encontrado. Acerquese.' : (e.message || String(e)));
   } finally { setBusy(false); }
 }
 // El icono es el boton: mantener 0,7 s = ACTIVAR (evita activar por un toque accidental); tocar con el equipo activado = DESACTIVAR.
