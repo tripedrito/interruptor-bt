@@ -238,10 +238,10 @@ function renderWifi() {
     const s = Math.round(j.nx - now);
     if (s > 0) html = 'Internet vuelve en <b>' + mmss(s) + '</b><small>a las ' + hhmm(j.nx) + '</small>';
     else if (s > -180) { html = 'Conectando...<small>espere unos segundos</small>'; if (Date.now() - lastRefresh > 10000 && !busy && mode() === 'net') refresh(); }
-    else { cls += ' late'; html = 'Sin conexion<small>debia volver a las ' + hhmm(j.nx) + '. Use Bluetooth</small>'; }
+    else { cls += ' late'; html = 'Sin WiFi<small>debia volver a las ' + hhmm(j.nx) + '. Use Bluetooth</small>'; }
   } else if (j && j.bm && j.we && j.we > now) {
     cls += ' open';
-    html = 'Conexion abierta<small>se cierra en ' + mmss(Math.round(j.we - now)) + '</small>';
+    html = 'WiFi habilitado<small>se cierra en ' + mmss(Math.round(j.we - now)) + '</small>';
   }
   if (!html) { el.hidden = true; return; }
   el.className = cls; el.innerHTML = html; el.hidden = false;
@@ -253,7 +253,7 @@ setInterval(() => { if (!document.hidden && !busy && mode() === 'net') refresh()
 function explainOffline(j, name) {
   if (!j) return 'Sin datos del equipo.';
   if (j.wf === 0 && j.nx && Date.now() / 1000 < j.nx + 180) return 'Ahorro de bateria: sin Internet por ahora. Para abrir ya, use Bluetooth.';
-  return 'Sin conexion. Pruebe Bluetooth.';
+  return 'Sin WiFi. Pruebe Bluetooth.';
 }
 
 // El aviso "en linea = 0" del servidor puede quedar viejo (llega tarde cuando el equipo se reconecta).
